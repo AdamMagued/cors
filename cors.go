@@ -35,6 +35,7 @@ var (
 	headerVaryOrigin = []string{"Origin"}
 	headerOriginAll  = []string{"*"}
 	headerTrue       = []string{"true"}
+	originReplacer   = strings.NewReplacer("\r", "", "\n", "")
 )
 
 // Options is a configuration container to setup the CORS middleware.
@@ -348,7 +349,7 @@ func (c *Cors) handlePreflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		c.logf("  Preflight aborted: origin '%s' not allowed", origin)
+		c.logf("  Preflight aborted: origin '%s' not allowed", sanitizeOrigin(origin))
 		return
 	}
 
@@ -416,7 +417,7 @@ func (c *Cors) handleActualRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		c.logf("  Actual request no headers added: origin '%s' not allowed", origin)
+		c.logf("  Actual request no headers added: origin '%s' not allowed", sanitizeOrigin(origin))
 		return
 	}
 
@@ -447,6 +448,11 @@ func (c *Cors) logf(format string, a ...any) {
 	if c.Log != nil {
 		c.Log.Printf(format, a...)
 	}
+}
+
+// sanitizeOrigin removes carriage return and line feed characters from the origin header value before logging.
+func sanitizeOrigin(origin string) string {
+	return originReplacer.Replace(origin)
 }
 
 // check the Origin of a request. No origin at all is also allowed.

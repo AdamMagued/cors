@@ -900,5 +900,193 @@ func TestAccessControlExposeHeadersPresence(t *testing.T) {
 			})
 		})
 	}
-
 }
+
+func TestSanitizeOrigin(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "empty",
+			input: "",
+			want:  "",
+		},
+		{
+			name:  "standard origin without newlines",
+			input: "http://example.com",
+			want:  "http://example.com",
+		},
+		{
+			name:  "origin with crlf",
+			input: "http://example.com\r\ninjected",
+			want:  "http://example.cominjected",
+		},
+		{
+			name:  "origin with lf only",
+			input: "http://example.com\ninjected",
+			want:  "http://example.cominjected",
+		},
+		{
+			name:  "origin with cr only",
+			input: "http://example.com\rinjected",
+			want:  "http://example.cominjected",
+		},
+		{
+			name:  "origin with multiple crlf sequences",
+			input: "http://evil.com\r\n\r\nInjected-Header: evil\r\n",
+			want:  "http://evil.comInjected-Header: evil",
+		},
+		{
+			name:  "origin with leading and trailing crlf",
+			input: "\r\nhttp://example.com\r\n",
+			want:  "http://example.com",
+		},
+		{
+			name:  "log injection attempt payload",
+			input: "http://example.com\r\n[cors] yyyy/MM/dd hh:mm:ss Forged log entry",
+			want:  "http://example.com[cors] yyyy/MM/dd hh:mm:ss Forged log entry",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeOrigin(tc.input)
+			if got != tc.want {
+				t.Errorf("sanitizeOrigin(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDebugLoggingOriginSanitization(t *testing.T) {
+	testOrigins := []struct {
+		name           string
+		origin         string
+		expectedOrigin string
+	}{
+		{
+			name:           "origin with crlf",
+			origin:         "http://evil.com\r\n[cors] Forged log line",
+			expectedOrigin: "http://evil.com[cors] Forged log line",
+		},
+		{
+			name:           "origin with lf only",
+			origin:         "http://evil.com\n[cors] Forged log line",
+			expectedOrigin: "http://evil.com[cors] Forged log line",
+		},
+		{
+			name:           "origin with cr only",
+			origin:         "http://evil.com\r[cors] Forged log line",
+			expectedOrigin: "http://evil.com[cors] Forged log line",
+		},
+		{
+			name:           "origin with multiple crlf sequences",
+			origin:         "http://evil.com\r\n\r\nInjected: true\r\n",
+			expectedOrigin: "http://evil.comInjected: true",
+		},
+	}
+
+	for _, tc := range testOrigins {
+		t.Run("ActualRequest/"+tc.name, func(t *testing.T) {
+			logger := &testLogger{buf: &bytes.Buffer{}}
+			s := New(Options{
+				AllowedOrigins: []string{"http://allowed.com"},
+				Logger:         logger,
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "http://example.com/foo", nil)
+			req.Header.Set("Origin", tc.origin)
+			res := httptest.NewRecorder()
+
+			s.Handler(testHandler).ServeHTTP(res, req)
+
+			logOutput := logger.buf.String()
+			if strings.Contains(logOutput, "\r") {
+				t.Errorf("log output contains carriage return: %q", logOutput)
+			}
+			if strings.Contains(logOutput, "\n") {
+				t.Errorf("log output contains line feed: %q", logOutput)
+			}
+			wantSubstr := fmt.Sprintf("origin '%s' not allowed", tc.expectedOrigin)
+			if !strings.Contains(logOutput, wantSubstr) {
+				t.Errorf("log output %q does not contain expected substring %q", logOutput, wantSubstr)
+			}
+		})
+
+		t.Run("PreflightRequest/"+tc.name, func(t *testing.T) {
+			logger := &testLogger{buf: &bytes.Buffer{}}
+			s := New(Options{
+				AllowedOrigins: []string{"http://allowed.com"},
+				Logger:         logger,
+			})
+
+			req := httptest.NewRequest(http.MethodOptions, "http://example.com/foo", nil)
+			req.Header.Set("Origin", tc.origin)
+			req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+			res := httptest.NewRecorder()
+
+			s.Handler(testHandler).ServeHTTP(res, req)
+
+			logOutput := logger.buf.String()
+			if strings.Contains(logOutput, "\r") {
+				t.Errorf("log output contains carriage return: %q", logOutput)
+			}
+			if strings.Contains(logOutput, "\n") {
+				t.Errorf("log output contains line feed: %q", logOutput)
+			}
+			wantSubstr := fmt.Sprintf("origin '%s' not allowed", tc.expectedOrigin)
+			if !strings.Contains(logOutput, wantSubstr) {
+				t.Errorf("log output %q does not contain expected substring %q", logOutput, wantSubstr)
+			}
+		})
+
+		t.Run("HandlerFunc/"+tc.name, func(t *testing.T) {
+			logger := &testLogger{buf: &bytes.Buffer{}}
+			s := New(Options{
+				AllowedOrigins: []string{"http://allowed.com"},
+				Logger:         logger,
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "http://example.com/foo", nil)
+			req.Header.Set("Origin", tc.origin)
+			res := httptest.NewRecorder()
+
+			s.HandlerFunc(res, req)
+
+			logOutput := logger.buf.String()
+			if strings.Contains(logOutput, "\r") || strings.Contains(logOutput, "\n") {
+				t.Errorf("log output contains CRLF: %q", logOutput)
+			}
+			wantSubstr := fmt.Sprintf("origin '%s' not allowed", tc.expectedOrigin)
+			if !strings.Contains(logOutput, wantSubstr) {
+				t.Errorf("log output %q does not contain %q", logOutput, wantSubstr)
+			}
+		})
+
+		t.Run("Negroni/"+tc.name, func(t *testing.T) {
+			logger := &testLogger{buf: &bytes.Buffer{}}
+			s := New(Options{
+				AllowedOrigins: []string{"http://allowed.com"},
+				Logger:         logger,
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "http://example.com/foo", nil)
+			req.Header.Set("Origin", tc.origin)
+			res := httptest.NewRecorder()
+
+			s.ServeHTTP(res, req, testHandler)
+
+			logOutput := logger.buf.String()
+			if strings.Contains(logOutput, "\r") || strings.Contains(logOutput, "\n") {
+				t.Errorf("log output contains CRLF: %q", logOutput)
+			}
+			wantSubstr := fmt.Sprintf("origin '%s' not allowed", tc.expectedOrigin)
+			if !strings.Contains(logOutput, wantSubstr) {
+				t.Errorf("log output %q does not contain %q", logOutput, wantSubstr)
+			}
+		})
+	}
+}
+
